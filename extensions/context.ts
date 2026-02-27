@@ -135,9 +135,14 @@ function buildSkillIndex(pi: ExtensionAPI, cwd: string): SkillIndexEntry[] {
 }
 
 const SKILL_LOADED_ENTRY = "context:skill_loaded";
+const AGENTS_LOADED_ENTRY = "context:agents_loaded";
 
 type SkillLoadedEntryData = {
 	name: string;
+	path: string;
+};
+
+type AgentsLoadedEntryData = {
 	path: string;
 };
 
@@ -148,6 +153,17 @@ function getLoadedSkillsFromSession(ctx: ExtensionContext): Set<string> {
 		if ((e as any)?.customType !== SKILL_LOADED_ENTRY) continue;
 		const data = (e as any)?.data as SkillLoadedEntryData | undefined;
 		if (data?.name) out.add(data.name);
+	}
+	return out;
+}
+
+function getLoadedAgentsFromSession(ctx: ExtensionContext): Set<string> {
+	const out = new Set<string>();
+	for (const e of ctx.sessionManager.getEntries()) {
+		if ((e as any)?.type !== "custom") continue;
+		if ((e as any)?.customType !== AGENTS_LOADED_ENTRY) continue;
+		const data = (e as any)?.data as AgentsLoadedEntryData | undefined;
+		if (data?.path) out.add(data.path);
 	}
 	return out;
 }
@@ -422,9 +438,10 @@ class ContextView implements Component {
 }
 
 export default function contextExtension(pi: ExtensionAPI) {
-	// Track which skills were actually pulled in via read tool calls.
+	// Track which skills and AGENTS.md files were pulled in via read tool calls.
 	let lastSessionId: string | null = null;
 	let cachedLoadedSkills = new Set<string>();
+	let cachedLoadedAgents = new Set<string>();
 	let cachedSkillIndex: SkillIndexEntry[] = [];
 
 	const ensureCaches = (ctx: ExtensionContext) => {
@@ -432,6 +449,7 @@ export default function contextExtension(pi: ExtensionAPI) {
 		if (sid !== lastSessionId) {
 			lastSessionId = sid;
 			cachedLoadedSkills = getLoadedSkillsFromSession(ctx);
+			cachedLoadedAgents = getLoadedAgentsFromSession(ctx);
 			cachedSkillIndex = buildSkillIndex(pi, ctx.cwd);
 		}
 		if (cachedSkillIndex.length === 0) {
@@ -461,6 +479,14 @@ export default function contextExtension(pi: ExtensionAPI) {
 
 		ensureCaches(ctx);
 		const abs = normalizeReadPath(p, ctx.cwd);
+
+		// Track AGENTS.md reads
+		if (path.basename(abs) === "AGENTS.md" && !cachedLoadedAgents.has(abs)) {
+			cachedLoadedAgents.add(abs);
+			pi.appendEntry<AgentsLoadedEntryData>(AGENTS_LOADED_ENTRY, { path: abs });
+		}
+
+		// Track skill reads
 		const skillName = matchSkillForPath(abs);
 		if (!skillName) return;
 
@@ -493,6 +519,19 @@ export default function contextExtension(pi: ExtensionAPI) {
 				.sort((a, b) => a.localeCompare(b));
 
 			const agentFiles = await loadProjectContextFiles(ctx.cwd);
+			const agentFilesSeen = new Set(agentFiles.map((f) => path.resolve(f.path)));
+
+			// Merge in dynamically-loaded AGENTS.md (from subdir-context or manual reads)
+			const dynamicAgents = getLoadedAgentsFromSession(ctx);
+			for (const absPath of dynamicAgents) {
+				if (agentFilesSeen.has(absPath)) continue;
+				agentFilesSeen.add(absPath);
+				const f = await readFileIfExists(absPath);
+				if (f) {
+					agentFiles.push({ path: f.path, tokens: estimateTokens(f.content), bytes: f.bytes });
+				}
+			}
+
 			const agentFilePaths = agentFiles.map((f) => shortenPath(f.path, ctx.cwd));
 			const agentTokens = agentFiles.reduce((a, f) => a + f.tokens, 0);
 
