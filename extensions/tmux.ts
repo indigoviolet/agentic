@@ -15,7 +15,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, watch, readFileSync, unlinkSync, existsSync, type FSWatcher } from "node:fs";
+import { mkdirSync, watch, readFileSync, writeFileSync, unlinkSync, existsSync, type FSWatcher } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -126,13 +126,22 @@ function attachToSession(cwd: string): string {
 }
 
 /**
- * Wrap a command so it signals completion by writing exit code to a file.
- * The signal file name encodes session and window index for the watcher.
+ * Write a wrapper script that echoes the command, runs it, then signals.
+ * The pane shows `source /tmp/.../run.sh` on the prompt line, but the script
+ * prints `$ <original command>` so the user can see what's actually running.
  */
-function wrapCommand(cmd: string, session: string, windowIndex: number): string {
+function sendCommandWithSignal(session: string, windowIndex: number, cmd: string): void {
   const signalFile = join(SIGNAL_DIR, `${session}__${windowIndex}`);
-  // Run the command, capture its exit code, write it to the signal file
-  return `${cmd}; echo $? > "${signalFile}"`;
+  const scriptDir = join(SIGNAL_DIR, "scripts");
+  mkdirSync(scriptDir, { recursive: true });
+  const scriptPath = join(scriptDir, `${session}__${windowIndex}.sh`);
+  const script = `#!/usr/bin/env bash
+echo '$ ${cmd.replace(/'/g, "'\\''")}'
+${cmd}
+echo $? > "${signalFile}"
+`;
+  writeFileSync(scriptPath, script, { mode: 0o755 });
+  exec(`tmux send-keys -t ${session}:${windowIndex} "source ${scriptPath}" C-m`);
 }
 
 function addWindow(session: string, gitRoot: string, cmd: string, name?: string): number {
@@ -141,8 +150,7 @@ function addWindow(session: string, gitRoot: string, cmd: string, name?: string)
     `tmux new-window -t ${session} -n "${escapeForTmux(winName)}" -c "${gitRoot}" -P -F "#{window_index}"`
   );
   const idx = parseInt(raw);
-  const wrapped = wrapCommand(cmd, session, idx);
-  exec(`tmux send-keys -t ${session}:${idx} "${escapeForTmux(wrapped)}" C-m`);
+  sendCommandWithSignal(session, idx, cmd);
   return idx;
 }
 
@@ -317,8 +325,7 @@ The user can also type /tmux to attach in iTerm2, or /tmux:cat to select a windo
           if (!exists) {
             const firstName = (names[0] ?? params.commands[0].split(/[|;&\s]/)[0].split("/").pop() ?? "shell").slice(0, 30);
             exec(`tmux new-session -d -s ${session} -n "${escapeForTmux(firstName)}" -c "${gitRoot}"`);
-            const wrapped = wrapCommand(params.commands[0], session, 0);
-            exec(`tmux send-keys -t ${session}:0 "${escapeForTmux(wrapped)}" C-m`);
+            sendCommandWithSignal(session, 0, params.commands[0]);
             indices.push(0);
 
             for (let i = 1; i < params.commands.length; i++) {
