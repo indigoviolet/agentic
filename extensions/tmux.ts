@@ -111,9 +111,17 @@ function attachToSession(cwd: string): string {
   }
 }
 
+function windowName(cmd: string): string {
+  // Use the first word/binary of the command, strip paths
+  const first = cmd.split(/[|;&\s]/)[0].trim();
+  const base = first.split("/").pop() ?? first;
+  return base.slice(0, 20);
+}
+
 function addWindow(session: string, gitRoot: string, cmd: string): number {
+  const name = windowName(cmd);
   const raw = exec(
-    `tmux new-window -t ${session} -c "${gitRoot}" -P -F "#{window_index}"`
+    `tmux new-window -t ${session} -n "${escapeForTmux(name)}" -c "${gitRoot}" -P -F "#{window_index}"`
   );
   const idx = parseInt(raw);
   exec(`tmux send-keys -t ${session}:${idx} "${escapeForTmux(cmd)}" C-m`);
@@ -214,7 +222,8 @@ The user can also type /tmux to attach in iTerm2, or /tmux:transfer to select a 
           const indices: number[] = [];
 
           if (!exists) {
-            exec(`tmux new-session -d -s ${session} -c "${gitRoot}"`);
+            const firstName = windowName(params.commands[0]);
+            exec(`tmux new-session -d -s ${session} -n "${escapeForTmux(firstName)}" -c "${gitRoot}"`);
             exec(`tmux send-keys -t ${session}:0 "${escapeForTmux(params.commands[0])}" C-m`);
             indices.push(0);
 
