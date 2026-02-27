@@ -20,9 +20,13 @@ pi -e git:github.com/indigoviolet/agentic
 
 Interactive Q&A extraction — extracts questions from the last assistant message and presents a custom TUI to answer them one by one. Registers `/answer` command and `Ctrl+.` shortcut.
 
+### subdir-context
+
+Automatically loads `AGENTS.md` files from subdirectories when the agent reads files or runs bash commands that reference those directories. Scans the project at session start, then sends followUp read messages through the normal pipeline so other extensions (like `context`) can see them. Inspired by [default-anton/pi-subdir-context](https://github.com/default-anton/pi-subdir-context).
+
 ### context
 
-Shows a TUI overview of loaded context: extensions, skills, AGENTS.md files, context window usage bar, and session token/cost totals. Registers `/context` command. Also tracks which skills have been loaded via read calls.
+Shows a TUI overview of loaded context: extensions, skills, AGENTS.md files, context window usage bar, and session token/cost totals. Registers `/context` command. Also tracks which skills and subdirectory AGENTS.md files have been loaded via read calls.
 
 ### tmux (separate package)
 
@@ -34,4 +38,4 @@ pi install npm:@romansix/pi-tmux
 
 ---
 
-`answer` and `context` are based on [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) by Armin Ronacher, licensed under Apache 2.0.
+`answer` and `context` are based on [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) by Armin Ronacher, licensed under Apache 2.0. `context` has been extended to track dynamically-loaded subdirectory AGENTS.md files (via `subdir-context` or manual reads).
