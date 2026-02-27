@@ -10,9 +10,6 @@
   "pi": {
     "extensions": ["./extensions"]
   },
-  "dependencies": {
-    "chokidar": "^4"
-  },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-ai": "*",
