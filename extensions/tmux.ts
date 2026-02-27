@@ -6,6 +6,7 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 import { Type, type Static } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { execSync } from "node:child_process";
@@ -341,6 +342,43 @@ The user can also type /tmux to attach in iTerm2, or /tmux:transfer to select a 
             isError: true,
           };
       }
+    },
+
+    renderCall(args, theme) {
+      const action = args.action ?? "tmux";
+      let text = theme.fg("toolTitle", theme.bold("tmux "));
+      text += theme.fg("accent", action);
+
+      if (action === "run" && Array.isArray(args.commands)) {
+        for (const cmd of args.commands) {
+          text += "\n  " + theme.fg("muted", cmd);
+        }
+      } else if (action === "peek" && args.window !== undefined) {
+        text += theme.fg("muted", ` :${args.window}`);
+      }
+
+      return new Text(text, 0, 0);
+    },
+
+    renderResult(result, { expanded }, theme) {
+      const content = result.content?.[0];
+      const raw = content?.type === "text" ? content.text : "";
+
+      if (result.isError) {
+        return new Text(theme.fg("error", raw), 0, 0);
+      }
+
+      // First line is the summary, rest is detail
+      const lines = raw.split("\n");
+      const summary = lines[0] ?? "";
+      const detail = lines.slice(1).join("\n");
+
+      let text = theme.fg("success", "✓ ") + summary;
+      if (expanded && detail) {
+        text += "\n" + theme.fg("dim", detail);
+      }
+
+      return new Text(text, 0, 0);
     },
   });
 }
