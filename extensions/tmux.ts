@@ -14,9 +14,10 @@ import { Text } from "@mariozechner/pi-tui";
 import { Type, type Static } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { execSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdirSync, watch, readFileSync, writeFileSync, unlinkSync, existsSync, type FSWatcher } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { watch as chokidarWatch, type FSWatcher } from "chokidar";
 
 
 const SIGNAL_DIR = "/tmp/pi-tmux";
@@ -128,18 +129,20 @@ function attachToSession(cwd: string): string {
 const SCRIPT_DIR = join(SIGNAL_DIR, "s");
 
 /**
- * Write a per-window script with set -x for visibility, then signal on exit.
- * The pane shows each command prefixed with + as bash executes it.
+ * Write a per-window script that echoes itself before executing.
+ * cat "$0" prints the full script (including heredocs etc. that set -x misses),
+ * then a separator, then the actual command runs.
  */
 function sendCommandWithSignal(session: string, windowIndex: number, cmd: string): void {
   mkdirSync(SCRIPT_DIR, { recursive: true });
-  const signalFile = join(SIGNAL_DIR, `${session}__${windowIndex}`);
-  const scriptPath = join(SCRIPT_DIR, `${session}__${windowIndex}.sh`);
+  const id = randomBytes(4).toString("hex");
+  const signalFile = join(SIGNAL_DIR, `${session}.${windowIndex}.${id}`);
+  const scriptPath = join(SCRIPT_DIR, `${session}.${windowIndex}.${id}.sh`);
   writeFileSync(scriptPath, `#!/usr/bin/env bash
-set -x
+cat "$0"
+echo '---'
 ${cmd}
 __rc=$?
-{ set +x; } 2>/dev/null
 echo $__rc > "${signalFile}"
 `, { mode: 0o755 });
   exec(`tmux send-keys -t ${session}:${windowIndex} "${escapeForTmux(scriptPath)}" C-m`);
@@ -163,70 +166,66 @@ export default function (pi: ExtensionAPI) {
   // Ensure signal directory exists
   mkdirSync(SIGNAL_DIR, { recursive: true });
 
-  // Track watchers for cleanup
+  // Track watcher for cleanup
   let watcher: FSWatcher | null = null;
-
-  // Debounce set to avoid double-processing
-  const processed = new Set<string>();
 
   function startWatching() {
     if (watcher) return;
 
-    watcher = watch(SIGNAL_DIR, (eventType, filename) => {
-      if (!filename || eventType !== "rename") return;
-      if (processed.has(filename)) return;
+    watcher = chokidarWatch(SIGNAL_DIR, {
+      ignoreInitial: true,
+      depth: 0,
+      // Ignore script subdirectory and .sh files
+      ignored: [join(SIGNAL_DIR, "s"), /\.sh$/],
+      // Small stabilization delay for atomic writes
+      awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 50 },
+    });
 
-      const filepath = join(SIGNAL_DIR, filename);
-      // Small delay to let the file be fully written
-      setTimeout(() => {
-        try {
-          if (!existsSync(filepath)) return;
-          processed.add(filename);
+    watcher.on("add", (filepath) => {
+      try {
+        const filename = filepath.split("/").pop()!;
+        const exitCode = readFileSync(filepath, "utf-8").trim();
+        unlinkSync(filepath);
 
-          const exitCode = readFileSync(filepath, "utf-8").trim();
-          unlinkSync(filepath);
+        // Parse session.windowIndex.id from filename
+        const lastDot = filename.lastIndexOf(".");
+        const secondLastDot = filename.lastIndexOf(".", lastDot - 1);
+        if (secondLastDot === -1) return;
+        const session = filename.slice(0, secondLastDot);
+        const winStr = filename.slice(secondLastDot + 1, lastDot);
+        const winIdx = parseInt(winStr);
+        if (isNaN(winIdx)) return;
 
-          // Parse session__windowIndex from filename
-          const parts = filename.split("__");
-          if (parts.length !== 2) return;
-          const [session, winStr] = parts;
-          const winIdx = parseInt(winStr);
-          if (isNaN(winIdx)) return;
+        // Get window name
+        const windows = getWindows(session);
+        const win = windows.find((w) => w.index === winIdx);
+        const winName = win?.title ?? `window ${winIdx}`;
 
-          // Get window name
-          const windows = getWindows(session);
-          const win = windows.find((w) => w.index === winIdx);
-          const winName = win?.title ?? `window ${winIdx}`;
+        // Capture recent output
+        const output = execSafe(`tmux capture-pane -t ${session}:${winIdx} -p -S -30`);
+        const trimmedOutput = (output ?? "").split("\n").filter(l => l.trim()).slice(-20).join("\n");
 
-          // Capture recent output
-          const output = execSafe(`tmux capture-pane -t ${session}:${winIdx} -p -S -30`);
-          const trimmedOutput = (output ?? "").split("\n").filter(l => l.trim()).slice(-20).join("\n");
+        const code = parseInt(exitCode);
+        const status = code === 0 ? "completed successfully" : `exited with code ${code}`;
 
-          const code = parseInt(exitCode);
-          const status = code === 0 ? "completed successfully" : `exited with code ${code}`;
-
-          pi.sendMessage({
-            customType: "tmux-completion",
-            content: `tmux window "${winName}" (:${winIdx}) ${status}.\n\n\`\`\`\n${trimmedOutput}\n\`\`\``,
-            display: true,
-          }, {
-            triggerTurn: true,
-            deliverAs: "followUp",
-          });
-
-          // Clean up processed set after a while
-          setTimeout(() => processed.delete(filename), 60000);
-        } catch {
-          // Ignore errors from racing deletes etc.
-        }
-      }, 200);
+        pi.sendMessage({
+          customType: "tmux-completion",
+          content: `tmux window "${winName}" (:${winIdx}) ${status}.\n\n\`\`\`\n${trimmedOutput}\n\`\`\``,
+          display: true,
+        }, {
+          triggerTurn: true,
+          deliverAs: "followUp",
+        });
+      } catch {
+        // Ignore errors from racing deletes etc.
+      }
     });
   }
 
   // Clean up on shutdown
   pi.on("session_shutdown", async () => {
     if (watcher) {
-      watcher.close();
+      await watcher.close();
       watcher = null;
     }
   });
