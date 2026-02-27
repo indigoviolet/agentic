@@ -19,6 +19,11 @@ const TmuxParams = Type.Object({
       description: "Commands to run (for 'run' action). Each gets its own tmux window.",
     })
   ),
+  names: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Short descriptive names for each window (for 'run' action). Must match length of commands. E.g. ['dev-server', 'tests', 'db'].",
+    })
+  ),
   window: Type.Optional(
     Type.Union([Type.Number(), Type.String()], {
       description: "Window index or 'all' (for 'peek' action). Defaults to 'all'.",
@@ -111,17 +116,10 @@ function attachToSession(cwd: string): string {
   }
 }
 
-function windowName(cmd: string): string {
-  // Use the first word/binary of the command, strip paths
-  const first = cmd.split(/[|;&\s]/)[0].trim();
-  const base = first.split("/").pop() ?? first;
-  return base.slice(0, 20);
-}
-
-function addWindow(session: string, gitRoot: string, cmd: string): number {
-  const name = windowName(cmd);
+function addWindow(session: string, gitRoot: string, cmd: string, name?: string): number {
+  const winName = (name ?? cmd.split(/[|;&\s]/)[0].split("/").pop() ?? "shell").slice(0, 30);
   const raw = exec(
-    `tmux new-window -t ${session} -n "${escapeForTmux(name)}" -c "${gitRoot}" -P -F "#{window_index}"`
+    `tmux new-window -t ${session} -n "${escapeForTmux(winName)}" -c "${gitRoot}" -P -F "#{window_index}"`
   );
   const idx = parseInt(raw);
   exec(`tmux send-keys -t ${session}:${idx} "${escapeForTmux(cmd)}" C-m`);
@@ -220,20 +218,21 @@ The user can also type /tmux to attach in iTerm2, or /tmux:transfer to select a 
 
           const exists = sessionExists(session);
           const indices: number[] = [];
+          const names = params.names ?? [];
 
           if (!exists) {
-            const firstName = windowName(params.commands[0]);
+            const firstName = (names[0] ?? params.commands[0].split(/[|;&\s]/)[0].split("/").pop() ?? "shell").slice(0, 30);
             exec(`tmux new-session -d -s ${session} -n "${escapeForTmux(firstName)}" -c "${gitRoot}"`);
             exec(`tmux send-keys -t ${session}:0 "${escapeForTmux(params.commands[0])}" C-m`);
             indices.push(0);
 
             for (let i = 1; i < params.commands.length; i++) {
-              const idx = addWindow(session, gitRoot, params.commands[i]);
+              const idx = addWindow(session, gitRoot, params.commands[i], names[i]);
               indices.push(idx);
             }
           } else {
-            for (const cmd of params.commands) {
-              const idx = addWindow(session, gitRoot, cmd);
+            for (let i = 0; i < params.commands.length; i++) {
+              const idx = addWindow(session, gitRoot, params.commands[i], names[i]);
               indices.push(idx);
             }
           }
@@ -359,8 +358,10 @@ The user can also type /tmux to attach in iTerm2, or /tmux:transfer to select a 
       text += theme.fg("accent", action);
 
       if (action === "run" && Array.isArray(args.commands)) {
-        for (const cmd of args.commands) {
-          text += "\n  " + theme.fg("muted", cmd);
+        const names = Array.isArray(args.names) ? args.names : [];
+        for (let i = 0; i < args.commands.length; i++) {
+          const label = names[i] ? theme.fg("text", names[i] + ": ") : "";
+          text += "\n  " + label + theme.fg("muted", args.commands[i]);
         }
       } else if (action === "peek" && args.window !== undefined) {
         text += theme.fg("muted", ` :${args.window}`);
