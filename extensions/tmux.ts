@@ -17,9 +17,9 @@ import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, watch, readFileSync, writeFileSync, unlinkSync, existsSync, type FSWatcher } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 
-const SIGNAL_DIR = join(tmpdir(), "pi-tmux-signals");
+
+const SIGNAL_DIR = "/tmp/pi-tmux";
 
 const TmuxParams = Type.Object({
   action: StringEnum(["run", "attach", "peek", "kill", "list"] as const),
@@ -125,23 +125,24 @@ function attachToSession(cwd: string): string {
   }
 }
 
+const SCRIPT_DIR = join(SIGNAL_DIR, "s");
+
 /**
- * Write a wrapper script that echoes the command, runs it, then signals.
- * The pane shows `source /tmp/.../run.sh` on the prompt line, but the script
- * prints `$ <original command>` so the user can see what's actually running.
+ * Write a per-window script with set -x for visibility, then signal on exit.
+ * The pane shows each command prefixed with + as bash executes it.
  */
 function sendCommandWithSignal(session: string, windowIndex: number, cmd: string): void {
+  mkdirSync(SCRIPT_DIR, { recursive: true });
   const signalFile = join(SIGNAL_DIR, `${session}__${windowIndex}`);
-  const scriptDir = join(SIGNAL_DIR, "scripts");
-  mkdirSync(scriptDir, { recursive: true });
-  const scriptPath = join(scriptDir, `${session}__${windowIndex}.sh`);
-  const script = `#!/usr/bin/env bash
-echo '$ ${cmd.replace(/'/g, "'\\''")}'
+  const scriptPath = join(SCRIPT_DIR, `${session}__${windowIndex}.sh`);
+  writeFileSync(scriptPath, `#!/usr/bin/env bash
+set -x
 ${cmd}
-echo $? > "${signalFile}"
-`;
-  writeFileSync(scriptPath, script, { mode: 0o755 });
-  exec(`tmux send-keys -t ${session}:${windowIndex} "source ${scriptPath}" C-m`);
+__rc=$?
+{ set +x; } 2>/dev/null
+echo $__rc > "${signalFile}"
+`, { mode: 0o755 });
+  exec(`tmux send-keys -t ${session}:${windowIndex} "${escapeForTmux(scriptPath)}" C-m`);
 }
 
 function addWindow(session: string, gitRoot: string, cmd: string, name?: string): number {
