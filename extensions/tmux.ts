@@ -3,6 +3,10 @@
  *
  * Tool: tmux (run/attach/peek/list/kill)
  * Commands: /tmux (attach in iTerm2), /tmux:transfer (capture window output into conversation)
+ *
+ * Completion notifications: commands are wrapped so that when they finish,
+ * a signal file is written. A fs.watch picks it up and injects a message
+ * into the conversation with the exit code and recent output.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -11,6 +15,11 @@ import { Type, type Static } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdirSync, watch, readFileSync, unlinkSync, existsSync, type FSWatcher } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+const SIGNAL_DIR = join(tmpdir(), "pi-tmux-signals");
 
 const TmuxParams = Type.Object({
   action: StringEnum(["run", "attach", "peek", "kill", "list"] as const),
@@ -116,13 +125,24 @@ function attachToSession(cwd: string): string {
   }
 }
 
+/**
+ * Wrap a command so it signals completion by writing exit code to a file.
+ * The signal file name encodes session and window index for the watcher.
+ */
+function wrapCommand(cmd: string, session: string, windowIndex: number): string {
+  const signalFile = join(SIGNAL_DIR, `${session}__${windowIndex}`);
+  // Run the command, capture its exit code, write it to the signal file
+  return `${cmd}; echo $? > "${signalFile}"`;
+}
+
 function addWindow(session: string, gitRoot: string, cmd: string, name?: string): number {
   const winName = (name ?? cmd.split(/[|;&\s]/)[0].split("/").pop() ?? "shell").slice(0, 30);
   const raw = exec(
     `tmux new-window -t ${session} -n "${escapeForTmux(winName)}" -c "${gitRoot}" -P -F "#{window_index}"`
   );
   const idx = parseInt(raw);
-  exec(`tmux send-keys -t ${session}:${idx} "${escapeForTmux(cmd)}" C-m`);
+  const wrapped = wrapCommand(cmd, session, idx);
+  exec(`tmux send-keys -t ${session}:${idx} "${escapeForTmux(wrapped)}" C-m`);
   return idx;
 }
 
@@ -131,6 +151,77 @@ function escapeForTmux(s: string): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  // Ensure signal directory exists
+  mkdirSync(SIGNAL_DIR, { recursive: true });
+
+  // Track watchers for cleanup
+  let watcher: FSWatcher | null = null;
+
+  // Debounce set to avoid double-processing
+  const processed = new Set<string>();
+
+  function startWatching() {
+    if (watcher) return;
+
+    watcher = watch(SIGNAL_DIR, (eventType, filename) => {
+      if (!filename || eventType !== "rename") return;
+      if (processed.has(filename)) return;
+
+      const filepath = join(SIGNAL_DIR, filename);
+      // Small delay to let the file be fully written
+      setTimeout(() => {
+        try {
+          if (!existsSync(filepath)) return;
+          processed.add(filename);
+
+          const exitCode = readFileSync(filepath, "utf-8").trim();
+          unlinkSync(filepath);
+
+          // Parse session__windowIndex from filename
+          const parts = filename.split("__");
+          if (parts.length !== 2) return;
+          const [session, winStr] = parts;
+          const winIdx = parseInt(winStr);
+          if (isNaN(winIdx)) return;
+
+          // Get window name
+          const windows = getWindows(session);
+          const win = windows.find((w) => w.index === winIdx);
+          const winName = win?.title ?? `window ${winIdx}`;
+
+          // Capture recent output
+          const output = execSafe(`tmux capture-pane -t ${session}:${winIdx} -p -S -30`);
+          const trimmedOutput = (output ?? "").split("\n").filter(l => l.trim()).slice(-20).join("\n");
+
+          const code = parseInt(exitCode);
+          const status = code === 0 ? "completed successfully" : `exited with code ${code}`;
+
+          pi.sendMessage({
+            customType: "tmux-completion",
+            content: `tmux window "${winName}" (:${winIdx}) ${status}.\n\n\`\`\`\n${trimmedOutput}\n\`\`\``,
+            display: true,
+          }, {
+            triggerTurn: true,
+            deliverAs: "followUp",
+          });
+
+          // Clean up processed set after a while
+          setTimeout(() => processed.delete(filename), 60000);
+        } catch {
+          // Ignore errors from racing deletes etc.
+        }
+      }, 200);
+    });
+  }
+
+  // Clean up on shutdown
+  pi.on("session_shutdown", async () => {
+    if (watcher) {
+      watcher.close();
+      watcher = null;
+    }
+  });
+
   // /tmux — attach in iTerm2
   pi.registerCommand("tmux", {
     description: "Open iTerm2 tab attached to this project's tmux session",
@@ -187,7 +278,7 @@ export default function (pi: ExtensionAPI) {
 WHEN TO USE: Prefer this over bash for long-running or background commands: dev servers, file watchers, build processes, test suites, anything that runs continuously or takes more than a few seconds. Use bash for quick one-shot commands that complete immediately (ls, cat, grep, git status, etc.).
 
 Actions:
-- run: Run commands in new tmux windows. Each command gets its own window. If the session already exists, new windows are added to it.
+- run: Run commands in new tmux windows. Each command gets its own window. If the session already exists, new windows are added to it. When a command finishes, the agent is automatically notified with the exit code and recent output.
 - attach: Open an iTerm2 tab attached to the session (for the user to interact with).
 - peek: Capture recent output from tmux windows. Use window param to target a specific window, or omit for all. Use this to check on running processes.
 - list: List all windows in the session.
@@ -216,6 +307,9 @@ The user can also type /tmux to attach in iTerm2, or /tmux:transfer to select a 
             };
           }
 
+          // Start watching for completions
+          startWatching();
+
           const exists = sessionExists(session);
           const indices: number[] = [];
           const names = params.names ?? [];
@@ -223,7 +317,8 @@ The user can also type /tmux to attach in iTerm2, or /tmux:transfer to select a 
           if (!exists) {
             const firstName = (names[0] ?? params.commands[0].split(/[|;&\s]/)[0].split("/").pop() ?? "shell").slice(0, 30);
             exec(`tmux new-session -d -s ${session} -n "${escapeForTmux(firstName)}" -c "${gitRoot}"`);
-            exec(`tmux send-keys -t ${session}:0 "${escapeForTmux(params.commands[0])}" C-m`);
+            const wrapped = wrapCommand(params.commands[0], session, 0);
+            exec(`tmux send-keys -t ${session}:0 "${escapeForTmux(wrapped)}" C-m`);
             indices.push(0);
 
             for (let i = 1; i < params.commands.length; i++) {
@@ -238,7 +333,7 @@ The user can also type /tmux to attach in iTerm2, or /tmux:transfer to select a 
           }
 
           const lines = params.commands.map(
-            (cmd, i) => `  :${indices[i]}  ${cmd}`
+            (cmd, i) => `  :${indices[i]}  ${names[i] ? names[i] + ": " : ""}${cmd}`
           );
           return {
             content: [
@@ -390,5 +485,20 @@ The user can also type /tmux to attach in iTerm2, or /tmux:transfer to select a 
 
       return new Text(text, 0, 0);
     },
+  });
+
+  // Custom renderer for completion notifications
+  pi.registerMessageRenderer("tmux-completion", (message, { expanded }, theme) => {
+    const lines = (message.content as string).split("\n");
+    const summary = lines[0] ?? "";
+    const detail = lines.slice(1).join("\n");
+
+    const icon = summary.includes("successfully") ? theme.fg("success", "✓") : theme.fg("error", "✗");
+    let text = `${icon} ${theme.fg("toolTitle", "tmux")} ${summary}`;
+    if (expanded && detail) {
+      text += "\n" + theme.fg("dim", detail);
+    }
+
+    return new Text(text, 0, 0);
   });
 }
