@@ -29,7 +29,7 @@ Shows a TUI overview of loaded context: extensions, skills, AGENTS.md files, con
 Moved to [indigoviolet/pi-tmux](https://github.com/indigoviolet/pi-tmux). Install with:
 
 ```bash
-pi install npm:@indigoviolet/pi-tmux
+pi install npm:@romansix/pi-tmux
 ```
 
 ---
