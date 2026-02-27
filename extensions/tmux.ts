@@ -2,7 +2,7 @@
  * tmux extension - manages a tmux session per project (git root).
  *
  * Tool: tmux (run/attach/peek/list/kill)
- * Commands: /tmux (attach in iTerm2), /tmux:transfer (capture window output into conversation)
+ * Commands: /tmux (attach in iTerm2), /tmux:cat (capture window output into conversation)
  *
  * Completion notifications: commands are wrapped so that when they finish,
  * a signal file is written. A fs.watch picks it up and injects a message
@@ -231,8 +231,8 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // /tmux:transfer — capture window output into conversation
-  pi.registerCommand("tmux:transfer", {
+  // /tmux:cat — capture window output into conversation
+  pi.registerCommand("tmux:cat", {
     description: "Capture tmux window output and bring it into the conversation",
     handler: async (_args, ctx) => {
       const gitRoot = getGitRoot(ctx.cwd);
@@ -284,7 +284,7 @@ Actions:
 - list: List all windows in the session.
 - kill: Kill the entire session.
 
-The user can also type /tmux to attach in iTerm2, or /tmux:transfer to select a window and bring its output into the conversation.`,
+The user can also type /tmux to attach in iTerm2, or /tmux:cat to select a window and bring its output into the conversation.`,
     parameters: TmuxParams,
 
     async execute(toolCallId, params, signal, onUpdate, ctx) {
