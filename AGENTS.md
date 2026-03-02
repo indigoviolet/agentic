@@ -16,16 +16,6 @@ Pi coding agent extensions repo — published as a pi package via `pi install gi
 - TUI docs: `/Users/venky/.bun/install/global/node_modules/@mariozechner/pi-coding-agent/docs/tui.md`
 - Examples: `/Users/venky/.bun/install/global/node_modules/@mariozechner/pi-coding-agent/examples/extensions/`
 
-## Key patterns
-
-- `pi.registerCommand()` for `/commands`, `pi.registerShortcut()` for keybindings
-- `pi.registerTool()` for LLM-callable tools
-- `ctx.ui.setWidget()` for persistent content above/below editor
-- `ctx.ui.custom()` for interactive TUI (SelectList, BorderedLoader, etc.)
-- `ctx.ui.setStatus()` for footer indicators
-- `pi.appendEntry()` for state persistence across turns/restarts
-- Session restore via `pi.on("session_start")` reading `ctx.sessionManager.getEntries()`
-
 ## Rules
 
 - Every rendered line must respect `width` — use `truncateToWidth()` as a safety net
