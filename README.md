@@ -28,6 +28,10 @@ Automatically loads `AGENTS.md` files from subdirectories when the agent reads f
 
 Shows a TUI overview of loaded context: extensions, skills, AGENTS.md files, context window usage bar, and session token/cost totals. Registers `/context` command. Also tracks which skills and subdirectory AGENTS.md files have been loaded via read calls.
 
+### pin
+
+Pin an assistant response as a widget above the editor. `/pin` opens a selector to pick from recent responses. `Ctrl+Shift+Y` toggles between full (rendered markdown with tables, code blocks, etc.) and minimal (first line) view. `/unpin` removes it. State persists across turns and session restore.
+
 ### tmux (separate package)
 
 Moved to [indigoviolet/pi-tmux](https://github.com/indigoviolet/pi-tmux). Install with:
