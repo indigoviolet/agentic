@@ -99,12 +99,28 @@ export default function subdirContext(pi: ExtensionAPI) {
 		return result;
 	}
 
-	async function resetSession(cwd: string) {
+	async function resetSession(cwd: string, ctx: ExtensionContext) {
 		currentCwd = resolvePath(cwd, process.cwd());
 		cwdAgentsPath = path.join(currentCwd, "AGENTS.md");
 		loadedAgents.clear();
 		loadedAgents.add(cwdAgentsPath);
 		agentsDirMap = await scanForAgentsFiles(currentCwd);
+
+		// Reconstruct loadedAgents from session history (survives /reload)
+		for (const entry of ctx.sessionManager.getBranch()) {
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			for (const block of entry.message.content) {
+				if (
+					block.type === "toolCall" &&
+					block.name === "read" &&
+					typeof block.arguments?.path === "string" &&
+					path.basename(block.arguments.path) === "AGENTS.md"
+				) {
+					const absPath = path.normalize(resolvePath(block.arguments.path, currentCwd));
+					loadedAgents.add(absPath);
+				}
+			}
+		}
 	}
 
 	/**
@@ -156,7 +172,7 @@ export default function subdirContext(pi: ExtensionAPI) {
 	// --- Event handlers ---
 
 	const handleSessionChange = async (_event: unknown, ctx: ExtensionContext) => {
-		await resetSession(ctx.cwd);
+		await resetSession(ctx.cwd, ctx);
 	};
 
 	pi.on("session_start", handleSessionChange);
@@ -164,7 +180,7 @@ export default function subdirContext(pi: ExtensionAPI) {
 
 	pi.on("tool_result", async (event, ctx) => {
 		if (event.isError) return undefined;
-		if (!currentCwd) await resetSession(ctx.cwd);
+		if (!currentCwd) await resetSession(ctx.cwd, ctx);
 		if (allLoaded()) return undefined;
 
 		if (event.toolName === "read") {
