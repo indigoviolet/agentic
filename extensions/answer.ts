@@ -1,77 +1,124 @@
 /**
- * Q&A extraction hook - extracts questions from assistant responses
+ * Section response hook - extracts addressable subsections from assistant responses
  *
- * Custom interactive TUI for answering questions.
+ * Custom interactive TUI for responding to sections one at a time.
  *
- * Demonstrates the "prompt generator" pattern with custom TUI:
+ * Pattern:
  * 1. /answer command gets the last assistant message
- * 2. Shows a spinner while extracting questions as structured JSON
- * 3. Presents an interactive TUI to navigate and answer questions
- * 4. Submits the compiled answers when done
+ * 2. Shows a spinner while extracting sections as structured JSON
+ * 3. Presents an interactive TUI to navigate and respond to each section
+ * 4. When a section presents clear options, shows a selector
+ * 5. Submits the compiled responses when done
  */
 
 import { complete, type Model, type Api, type UserMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { BorderedLoader } from "@mariozechner/pi-coding-agent";
+import { BorderedLoader, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import {
 	type Component,
 	Editor,
 	type EditorTheme,
 	Key,
+	Markdown,
 	matchesKey,
+	SelectList,
+	type SelectListTheme,
 	truncateToWidth,
 	type TUI,
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@mariozechner/pi-tui";
 
-// Structured output format for question extraction
-interface ExtractedQuestion {
-	question: string;
-	context?: string;
+// ── Data model ───────────────────────────────────────────────────────────────
+
+interface ExtractedSection {
+	title: string;
+	content: string;
+	options?: string[];
 }
 
 interface ExtractionResult {
-	questions: ExtractedQuestion[];
+	sections: ExtractedSection[];
 }
 
-const SYSTEM_PROMPT = `You are a question extractor. Given text from a conversation, extract any questions that need answering.
+// ── System prompt ────────────────────────────────────────────────────────────
+
+const SYSTEM_PROMPT = `You are a text analyzer. Given text from a conversation, identify the distinct addressable subsections that a reader would want to respond to independently.
 
 Output a JSON object with this structure:
 {
-  "questions": [
+  "sections": [
     {
-      "question": "The question text",
-      "context": "Optional context that helps answer the question"
+      "title": "Brief identifier for this section",
+      "content": "The full text of the section, preserving formatting",
+      "options": ["option 1", "option 2"]
     }
   ]
 }
 
 Rules:
-- Extract all questions that require user input
-- Keep questions in the order they appeared
-- Be concise with question text
-- Include context only when it provides essential information for answering
-- If no questions are found, return {"questions": []}
+- Identify every logical subsection: numbered items, bullet groups, recommendation blocks, discussion points, questions, action items
+- Each section should be something a reader would respond to independently
+- "title" should be a concise identifier (e.g. "#1 — Test readability", "Database choice", "Next steps")
+- "content" must include the FULL text of that section — do not summarize or truncate
+- "options" is ONLY for sections that present a clear set of discrete choices or recommended actions. Include the options as short labels. Omit the field entirely when there are no clear choices.
+- Keep sections in the order they appeared
+- If the text has no distinct sections, return {"sections": []}
+- Do NOT split a single cohesive paragraph into multiple sections
+- DO split numbered/bulleted items into separate sections even if they are grouped under one heading
 
-Example output:
+Example — a message with recommendations:
 {
-  "questions": [
+  "sections": [
     {
-      "question": "What is your preferred database?",
-      "context": "We can only configure MySQL and PostgreSQL because of what is implemented."
+      "title": "#5, #6, #7 — No change needed",
+      "content": "#5 & #6 — [] default vs Field(default_factory=list)\\nThis is a non-issue for Pydantic...\\n\\n#7 — OpenAPI schema regen\\nKnown deferral...",
+      "options": ["Reply-only (explain why no change needed)", "Make code changes anyway", "Defer to later"]
     },
     {
-      "question": "Should we use TypeScript or JavaScript?"
+      "title": "#1 & #2 — Test readability",
+      "content": "Valid nits. The nested self._cfg(self._zip(self._file(...))) is hard to read...",
+      "options": ["Code changes — simplify test helpers", "Reply-only (explain current approach)", "Defer"]
+    }
+  ]
+}
+
+Example — a message with questions:
+{
+  "sections": [
+    {
+      "title": "Database choice",
+      "content": "What is your preferred database? We support MySQL and PostgreSQL.",
+      "options": ["MySQL", "PostgreSQL"]
+    },
+    {
+      "title": "Language preference",
+      "content": "Should we use TypeScript or JavaScript for the frontend?",
+      "options": ["TypeScript", "JavaScript"]
+    }
+  ]
+}
+
+Example — a message with discussion points (no options):
+{
+  "sections": [
+    {
+      "title": "Architecture concern",
+      "content": "The current approach uses a monolithic handler. We could split it into..."
+    },
+    {
+      "title": "Testing strategy",
+      "content": "We need to decide how to test the new pipeline..."
     }
   ]
 }`;
 
-const CODEX_MODEL_ID = "gpt-5.1-codex-mini";
 const HAIKU_MODEL_ID = "claude-haiku-4-5";
 
+// ── Model selection ──────────────────────────────────────────────────────────
+
 /**
- * Prefer Codex mini for extraction when available, otherwise fallback to haiku or the current model.
+ * Prefer Haiku for extraction, fallback to current model.
  */
 async function selectExtractionModel(
 	currentModel: Model<Api>,
@@ -80,14 +127,6 @@ async function selectExtractionModel(
 		getApiKey: (model: Model<Api>) => Promise<string | undefined>;
 	},
 ): Promise<Model<Api>> {
-	const codexModel = modelRegistry.find("openai-codex", CODEX_MODEL_ID);
-	if (codexModel) {
-		const apiKey = await modelRegistry.getApiKey(codexModel);
-		if (apiKey) {
-			return codexModel;
-		}
-	}
-
 	const haikuModel = modelRegistry.find("anthropic", HAIKU_MODEL_ID);
 	if (!haikuModel) {
 		return currentModel;
@@ -101,12 +140,10 @@ async function selectExtractionModel(
 	return haikuModel;
 }
 
-/**
- * Parse the JSON response from the LLM
- */
+// ── Parsing ──────────────────────────────────────────────────────────────────
+
 function parseExtractionResult(text: string): ExtractionResult | null {
 	try {
-		// Try to find JSON in the response (it might be wrapped in markdown code blocks)
 		let jsonStr = text;
 
 		// Remove markdown code block if present
@@ -116,7 +153,7 @@ function parseExtractionResult(text: string): ExtractionResult | null {
 		}
 
 		const parsed = JSON.parse(jsonStr);
-		if (parsed && Array.isArray(parsed.questions)) {
+		if (parsed && Array.isArray(parsed.sections)) {
 			return parsed as ExtractionResult;
 		}
 		return null;
@@ -125,23 +162,53 @@ function parseExtractionResult(text: string): ExtractionResult | null {
 	}
 }
 
+// ── Response types ───────────────────────────────────────────────────────────
+
+type SectionResponse =
+	| { kind: "option"; selected: string }
+	| { kind: "text"; text: string }
+	| { kind: "empty" };
+
+function responseToString(r: SectionResponse): string {
+	switch (r.kind) {
+		case "option":
+			return r.selected;
+		case "text":
+			return r.text;
+		case "empty":
+			return "(no response)";
+	}
+}
+
+function isResponseFilled(r: SectionResponse): boolean {
+	return r.kind !== "empty";
+}
+
+// ── TUI Component ────────────────────────────────────────────────────────────
+
 /**
- * Interactive Q&A component for answering extracted questions
+ * Interactive component for responding to extracted sections one at a time.
+ * Sections with options show a SelectList; others show a free-text Editor.
  */
-class QnAComponent implements Component {
-	private questions: ExtractedQuestion[];
-	private answers: string[];
+class SectionResponseComponent implements Component {
+	private sections: ExtractedSection[];
+	private responses: SectionResponse[];
 	private currentIndex: number = 0;
-	private editor: Editor;
 	private tui: TUI;
 	private onDone: (result: string | null) => void;
 	private showingConfirmation: boolean = false;
+
+	// Input modes — only one is active at a time
+	private editor: Editor;
+	private selectList?: SelectList;
+	/** When true, user pressed a key to switch from selector to free-text for a section with options */
+	private overrideToEditor: boolean = false;
 
 	// Cache
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 
-	// Colors - using proper reset sequences
+	// Colors
 	private dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
 	private bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 	private cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
@@ -149,66 +216,122 @@ class QnAComponent implements Component {
 	private yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
 	private gray = (s: string) => `\x1b[90m${s}\x1b[0m`;
 
+	private selectListTheme: SelectListTheme = {
+		selectedPrefix: (s: string) => this.cyan(s),
+		selectedText: (s: string) => this.cyan(s),
+		description: (s: string) => this.gray(s),
+		scrollInfo: (s: string) => this.dim(s),
+		noMatch: (s: string) => this.yellow(s),
+	};
+
 	constructor(
-		questions: ExtractedQuestion[],
+		sections: ExtractedSection[],
 		tui: TUI,
 		onDone: (result: string | null) => void,
 	) {
-		this.questions = questions;
-		this.answers = questions.map(() => "");
+		this.sections = sections;
+		this.responses = sections.map(() => ({ kind: "empty" as const }));
 		this.tui = tui;
 		this.onDone = onDone;
 
-		// Create a minimal theme for the editor
 		const editorTheme: EditorTheme = {
 			borderColor: this.dim,
-			selectList: {
-				selectedBg: (s: string) => `\x1b[44m${s}\x1b[0m`,
-				matchHighlight: this.cyan,
-				itemSecondary: this.gray,
-			},
+			selectList: this.selectListTheme,
 		};
 
 		this.editor = new Editor(tui, editorTheme);
-		// Disable the editor's built-in submit (which clears the editor)
-		// We'll handle Enter ourselves to preserve the text
 		this.editor.disableSubmit = true;
 		this.editor.onChange = () => {
 			this.invalidate();
 			this.tui.requestRender();
 		};
+
+		this.syncInputForCurrentSection();
 	}
 
-	private allQuestionsAnswered(): boolean {
-		this.saveCurrentAnswer();
-		return this.answers.every((a) => (a?.trim() || "").length > 0);
+	// ── Section / input helpers ────────────────────────────────────────────
+
+	private currentSection(): ExtractedSection {
+		return this.sections[this.currentIndex];
 	}
 
-	private saveCurrentAnswer(): void {
-		this.answers[this.currentIndex] = this.editor.getText();
+	private hasOptions(): boolean {
+		const s = this.currentSection();
+		return Array.isArray(s.options) && s.options.length > 0;
+	}
+
+	/** Should we show the selector (vs the editor) right now? */
+	private isSelectMode(): boolean {
+		return this.hasOptions() && !this.overrideToEditor;
+	}
+
+	/** Build / tear down the selector or editor to match the current section */
+	private syncInputForCurrentSection(): void {
+		const r = this.responses[this.currentIndex];
+
+		if (this.isSelectMode()) {
+			const opts = this.currentSection().options!;
+			this.selectList = new SelectList(
+				opts.map((o) => ({ value: o, label: o })),
+				Math.min(opts.length, 8),
+				this.selectListTheme,
+			);
+			// If user already chose an option for this section, pre-select it
+			if (r.kind === "option") {
+				const idx = opts.indexOf(r.selected);
+				if (idx >= 0) this.selectList.setSelectedIndex(idx);
+			}
+			// Wire up selection to auto-advance
+			this.selectList.onSelect = (item) => {
+				this.responses[this.currentIndex] = { kind: "option", selected: item.value };
+				this.advance();
+			};
+		} else {
+			this.selectList = undefined;
+			// Restore previously typed text
+			this.editor.setText(r.kind === "text" ? r.text : "");
+		}
+	}
+
+	private saveCurrentResponse(): void {
+		if (this.isSelectMode()) {
+			// selection is saved on select; nothing to persist mid-browse
+		} else {
+			const text = this.editor.getText().trim();
+			this.responses[this.currentIndex] = text ? { kind: "text", text } : { kind: "empty" };
+		}
 	}
 
 	private navigateTo(index: number): void {
-		if (index < 0 || index >= this.questions.length) return;
-		this.saveCurrentAnswer();
+		if (index < 0 || index >= this.sections.length) return;
+		this.saveCurrentResponse();
 		this.currentIndex = index;
-		this.editor.setText(this.answers[index] || "");
+		this.overrideToEditor = false;
+		this.syncInputForCurrentSection();
 		this.invalidate();
 	}
 
-	private submit(): void {
-		this.saveCurrentAnswer();
+	/** Move to next section, or show confirmation on last */
+	private advance(): void {
+		if (this.currentIndex < this.sections.length - 1) {
+			this.navigateTo(this.currentIndex + 1);
+		} else {
+			this.saveCurrentResponse();
+			this.showingConfirmation = true;
+			this.invalidate();
+		}
+		this.tui.requestRender();
+	}
 
-		// Build the response text
+	private submit(): void {
+		this.saveCurrentResponse();
+
 		const parts: string[] = [];
-		for (let i = 0; i < this.questions.length; i++) {
-			const q = this.questions[i];
-			const a = this.answers[i]?.trim() || "(no answer)";
-			parts.push(`Q: ${q.question}`);
-			if (q.context) {
-				parts.push(`> ${q.context}`);
-			}
-			parts.push(`A: ${a}`);
+		for (let i = 0; i < this.sections.length; i++) {
+			const s = this.sections[i];
+			const r = this.responses[i];
+			parts.push(`**${s.title}**`);
+			parts.push(responseToString(r));
 			parts.push("");
 		}
 
@@ -219,13 +342,15 @@ class QnAComponent implements Component {
 		this.onDone(null);
 	}
 
+	// ── Component interface ────────────────────────────────────────────────
+
 	invalidate(): void {
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
 	}
 
 	handleInput(data: string): void {
-		// Handle confirmation dialog
+		// Confirmation dialog
 		if (this.showingConfirmation) {
 			if (matchesKey(data, Key.enter) || data.toLowerCase() === "y") {
 				this.submit();
@@ -240,21 +365,23 @@ class QnAComponent implements Component {
 			return;
 		}
 
-		// Global navigation and commands
-		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+		// Global: cancel
+		if (matchesKey(data, Key.ctrl("c"))) {
 			this.cancel();
 			return;
 		}
 
-		// Tab / Shift+Tab for navigation
+		// Global: Tab / Shift+Tab navigation
 		if (matchesKey(data, Key.tab)) {
-			if (this.currentIndex < this.questions.length - 1) {
+			this.saveCurrentResponse();
+			if (this.currentIndex < this.sections.length - 1) {
 				this.navigateTo(this.currentIndex + 1);
 				this.tui.requestRender();
 			}
 			return;
 		}
 		if (matchesKey(data, Key.shift("tab"))) {
+			this.saveCurrentResponse();
 			if (this.currentIndex > 0) {
 				this.navigateTo(this.currentIndex - 1);
 				this.tui.requestRender();
@@ -262,35 +389,54 @@ class QnAComponent implements Component {
 			return;
 		}
 
-		// Arrow up/down for question navigation when editor is empty
-		// (Editor handles its own cursor navigation when there's content)
-		if (matchesKey(data, Key.up) && this.editor.getText() === "") {
-			if (this.currentIndex > 0) {
-				this.navigateTo(this.currentIndex - 1);
+		// ── Select mode ────────────────────────────────────────────────
+		if (this.isSelectMode() && this.selectList) {
+			// Escape in select mode → switch to free-text editor for this section
+			if (matchesKey(data, Key.escape)) {
+				this.overrideToEditor = true;
+				this.syncInputForCurrentSection();
+				this.invalidate();
 				this.tui.requestRender();
 				return;
 			}
-		}
-		if (matchesKey(data, Key.down) && this.editor.getText() === "") {
-			if (this.currentIndex < this.questions.length - 1) {
-				this.navigateTo(this.currentIndex + 1);
-				this.tui.requestRender();
-				return;
-			}
+
+			// Delegate to SelectList (up/down/enter)
+			this.selectList.handleInput(data);
+			this.invalidate();
+			this.tui.requestRender();
+			return;
 		}
 
-		// Handle Enter ourselves (editor's submit is disabled)
-		// Plain Enter moves to next question or shows confirmation on last question
-		// Shift+Enter adds a newline (handled by editor)
-		if (matchesKey(data, Key.enter) && !matchesKey(data, Key.shift("enter"))) {
-			this.saveCurrentAnswer();
-			if (this.currentIndex < this.questions.length - 1) {
-				this.navigateTo(this.currentIndex + 1);
-			} else {
-				// On last question - show confirmation
-				this.showingConfirmation = true;
+		// ── Editor mode ────────────────────────────────────────────────
+
+		// Escape in editor mode → cancel (or if overridden from select, go back to select)
+		if (matchesKey(data, Key.escape)) {
+			if (this.overrideToEditor && this.hasOptions()) {
+				this.overrideToEditor = false;
+				this.syncInputForCurrentSection();
+				this.invalidate();
+				this.tui.requestRender();
+				return;
 			}
-			this.invalidate();
+			this.cancel();
+			return;
+		}
+
+		// Plain Enter (not Shift+Enter) → advance
+		if (matchesKey(data, Key.enter) && !matchesKey(data, Key.shift("enter"))) {
+			this.saveCurrentResponse();
+			this.advance();
+			return;
+		}
+
+		// Up/Down when editor is empty → navigate sections
+		if (matchesKey(data, Key.up) && this.editor.getText() === "" && this.currentIndex > 0) {
+			this.navigateTo(this.currentIndex - 1);
+			this.tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, Key.down) && this.editor.getText() === "" && this.currentIndex < this.sections.length - 1) {
+			this.navigateTo(this.currentIndex + 1);
 			this.tui.requestRender();
 			return;
 		}
@@ -307,99 +453,103 @@ class QnAComponent implements Component {
 		}
 
 		const lines: string[] = [];
-		const boxWidth = Math.min(width - 4, 120); // Allow wider box
-		const contentWidth = boxWidth - 4; // 2 chars padding on each side
+		const boxWidth = Math.min(width - 4, 120);
+		const contentWidth = boxWidth - 4;
 
-		// Helper to create horizontal lines (dim the whole thing at once)
-		const horizontalLine = (count: number) => "─".repeat(count);
+		const hLine = (n: number) => "─".repeat(n);
 
-		// Helper to create a box line
 		const boxLine = (content: string, leftPad: number = 2): string => {
-			const paddedContent = " ".repeat(leftPad) + content;
-			const contentLen = visibleWidth(paddedContent);
-			const rightPad = Math.max(0, boxWidth - contentLen - 2);
-			return this.dim("│") + paddedContent + " ".repeat(rightPad) + this.dim("│");
+			const padded = " ".repeat(leftPad) + content;
+			const right = Math.max(0, boxWidth - visibleWidth(padded) - 2);
+			return this.dim("│") + padded + " ".repeat(right) + this.dim("│");
 		};
 
-		const emptyBoxLine = (): string => {
-			return this.dim("│") + " ".repeat(boxWidth - 2) + this.dim("│");
+		const emptyBoxLine = (): string =>
+			this.dim("│") + " ".repeat(boxWidth - 2) + this.dim("│");
+
+		const pad = (line: string): string => {
+			const w = visibleWidth(line);
+			return line + " ".repeat(Math.max(0, width - w));
 		};
 
-		const padToWidth = (line: string): string => {
-			const len = visibleWidth(line);
-			return line + " ".repeat(Math.max(0, width - len));
-		};
+		// ── Title bar ──────────────────────────────────────────────────
+		lines.push(pad(this.dim("╭" + hLine(boxWidth - 2) + "╮")));
+		const title = `${this.bold(this.cyan("Sections"))} ${this.dim(`(${this.currentIndex + 1}/${this.sections.length})`)}`;
+		lines.push(pad(boxLine(title)));
+		lines.push(pad(this.dim("├" + hLine(boxWidth - 2) + "┤")));
 
-		// Title
-		lines.push(padToWidth(this.dim("╭" + horizontalLine(boxWidth - 2) + "╮")));
-		const title = `${this.bold(this.cyan("Questions"))} ${this.dim(`(${this.currentIndex + 1}/${this.questions.length})`)}`;
-		lines.push(padToWidth(boxLine(title)));
-		lines.push(padToWidth(this.dim("├" + horizontalLine(boxWidth - 2) + "┤")));
-
-		// Progress indicator
-		const progressParts: string[] = [];
-		for (let i = 0; i < this.questions.length; i++) {
-			const answered = (this.answers[i]?.trim() || "").length > 0;
+		// ── Progress dots ──────────────────────────────────────────────
+		const dots: string[] = [];
+		for (let i = 0; i < this.sections.length; i++) {
+			const filled = isResponseFilled(this.responses[i]);
 			const current = i === this.currentIndex;
-			if (current) {
-				progressParts.push(this.cyan("●"));
-			} else if (answered) {
-				progressParts.push(this.green("●"));
-			} else {
-				progressParts.push(this.dim("○"));
+			if (current) dots.push(this.cyan("●"));
+			else if (filled) dots.push(this.green("●"));
+			else dots.push(this.dim("○"));
+		}
+		lines.push(pad(boxLine(dots.join(" "))));
+		lines.push(pad(emptyBoxLine()));
+
+		// ── Section title ──────────────────────────────────────────────
+		const sec = this.currentSection();
+		const sectionTitle = this.bold(this.cyan(sec.title));
+		for (const l of wrapTextWithAnsi(sectionTitle, contentWidth)) {
+			lines.push(pad(boxLine(l)));
+		}
+		lines.push(pad(emptyBoxLine()));
+
+		// ── Section content (rendered as markdown) ─────────────────────
+		const mdTheme = getMarkdownTheme();
+		const md = new Markdown(sec.content, 0, 0, mdTheme);
+		const mdLines = md.render(contentWidth - 2);
+		for (const l of mdLines) {
+			lines.push(pad(boxLine(l)));
+		}
+		lines.push(pad(emptyBoxLine()));
+
+		// ── Input area ─────────────────────────────────────────────────
+		lines.push(pad(this.dim("├" + hLine(boxWidth - 2) + "┤")));
+
+		if (this.isSelectMode() && this.selectList) {
+			// Render selector
+			const selectLines = this.selectList.render(contentWidth);
+			for (const l of selectLines) {
+				lines.push(pad(boxLine(l)));
 			}
-		}
-		lines.push(padToWidth(boxLine(progressParts.join(" "))));
-		lines.push(padToWidth(emptyBoxLine()));
-
-		// Current question
-		const q = this.questions[this.currentIndex];
-		const questionText = `${this.bold("Q:")} ${q.question}`;
-		const wrappedQuestion = wrapTextWithAnsi(questionText, contentWidth);
-		for (const line of wrappedQuestion) {
-			lines.push(padToWidth(boxLine(line)));
-		}
-
-		// Context if present
-		if (q.context) {
-			lines.push(padToWidth(emptyBoxLine()));
-			const contextText = this.gray(`> ${q.context}`);
-			const wrappedContext = wrapTextWithAnsi(contextText, contentWidth - 2);
-			for (const line of wrappedContext) {
-				lines.push(padToWidth(boxLine(line)));
-			}
-		}
-
-		lines.push(padToWidth(emptyBoxLine()));
-
-		// Render the editor component (multi-line input) with padding
-		// Skip the first and last lines (editor's own border lines)
-		const answerPrefix = this.bold("A: ");
-		const editorWidth = contentWidth - 4 - 3; // Extra padding + space for "A: "
-		const editorLines = this.editor.render(editorWidth);
-		for (let i = 1; i < editorLines.length - 1; i++) {
-			if (i === 1) {
-				// First content line gets the "A: " prefix
-				lines.push(padToWidth(boxLine(answerPrefix + editorLines[i])));
-			} else {
-				// Subsequent lines get padding to align with the first line
-				lines.push(padToWidth(boxLine("   " + editorLines[i])));
-			}
-		}
-
-		lines.push(padToWidth(emptyBoxLine()));
-
-		// Confirmation dialog or footer with controls
-		if (this.showingConfirmation) {
-			lines.push(padToWidth(this.dim("├" + horizontalLine(boxWidth - 2) + "┤")));
-			const confirmMsg = `${this.yellow("Submit all answers?")} ${this.dim("(Enter/y to confirm, Esc/n to cancel)")}`;
-			lines.push(padToWidth(boxLine(truncateToWidth(confirmMsg, contentWidth))));
 		} else {
-			lines.push(padToWidth(this.dim("├" + horizontalLine(boxWidth - 2) + "┤")));
-			const controls = `${this.dim("Tab/Enter")} next · ${this.dim("Shift+Tab")} prev · ${this.dim("Shift+Enter")} newline · ${this.dim("Esc")} cancel`;
-			lines.push(padToWidth(boxLine(truncateToWidth(controls, contentWidth))));
+			// Render editor
+			const label = this.bold("Response: ");
+			const editorWidth = contentWidth - 4 - visibleWidth("Response: ");
+			const editorLines = this.editor.render(editorWidth);
+			for (let i = 1; i < editorLines.length - 1; i++) {
+				if (i === 1) {
+					lines.push(pad(boxLine(label + editorLines[i])));
+				} else {
+					lines.push(pad(boxLine(" ".repeat(visibleWidth("Response: ")) + editorLines[i])));
+				}
+			}
 		}
-		lines.push(padToWidth(this.dim("╰" + horizontalLine(boxWidth - 2) + "╯")));
+
+		lines.push(pad(emptyBoxLine()));
+
+		// ── Footer ─────────────────────────────────────────────────────
+		if (this.showingConfirmation) {
+			lines.push(pad(this.dim("├" + hLine(boxWidth - 2) + "┤")));
+			const msg = `${this.yellow("Submit all responses?")} ${this.dim("(Enter/y to confirm, Esc/n to cancel)")}`;
+			lines.push(pad(boxLine(truncateToWidth(msg, contentWidth))));
+		} else {
+			lines.push(pad(this.dim("├" + hLine(boxWidth - 2) + "┤")));
+			let controls: string;
+			if (this.isSelectMode()) {
+				controls = `${this.dim("↑↓")} choose · ${this.dim("Enter")} select · ${this.dim("Tab")} next · ${this.dim("Shift+Tab")} prev · ${this.dim("Esc")} type custom · ${this.dim("Ctrl+C")} cancel`;
+			} else if (this.overrideToEditor && this.hasOptions()) {
+				controls = `${this.dim("Enter")} next · ${this.dim("Tab")} next · ${this.dim("Shift+Tab")} prev · ${this.dim("Shift+Enter")} newline · ${this.dim("Esc")} back to options · ${this.dim("Ctrl+C")} cancel`;
+			} else {
+				controls = `${this.dim("Enter")} next · ${this.dim("Tab")} next · ${this.dim("Shift+Tab")} prev · ${this.dim("Shift+Enter")} newline · ${this.dim("Esc")} cancel`;
+			}
+			lines.push(pad(boxLine(truncateToWidth(controls, contentWidth))));
+		}
+		lines.push(pad(this.dim("╰" + hLine(boxWidth - 2) + "╯")));
 
 		this.cachedWidth = width;
 		this.cachedLines = lines;
@@ -407,126 +557,128 @@ class QnAComponent implements Component {
 	}
 }
 
+// ── Extension entry point ────────────────────────────────────────────────────
+
 export default function (pi: ExtensionAPI) {
 	const answerHandler = async (ctx: ExtensionContext) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify("answer requires interactive mode", "error");
-				return;
-			}
+		if (!ctx.hasUI) {
+			ctx.ui.notify("answer requires interactive mode", "error");
+			return;
+		}
 
-			if (!ctx.model) {
-				ctx.ui.notify("No model selected", "error");
-				return;
-			}
+		if (!ctx.model) {
+			ctx.ui.notify("No model selected", "error");
+			return;
+		}
 
-			// Find the last assistant message on the current branch
-			const branch = ctx.sessionManager.getBranch();
-			let lastAssistantText: string | undefined;
+		// Find the last assistant message on the current branch
+		const branch = ctx.sessionManager.getBranch();
+		let lastAssistantText: string | undefined;
 
-			for (let i = branch.length - 1; i >= 0; i--) {
-				const entry = branch[i];
-				if (entry.type === "message") {
-					const msg = entry.message;
-					if ("role" in msg && msg.role === "assistant") {
-						if (msg.stopReason !== "stop") {
-							ctx.ui.notify(`Last assistant message incomplete (${msg.stopReason})`, "error");
-							return;
-						}
-						const textParts = msg.content
-							.filter((c): c is { type: "text"; text: string } => c.type === "text")
-							.map((c) => c.text);
-						if (textParts.length > 0) {
-							lastAssistantText = textParts.join("\n");
-							break;
-						}
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry.type === "message") {
+				const msg = entry.message;
+				if ("role" in msg && msg.role === "assistant") {
+					if (msg.stopReason !== "stop") {
+						ctx.ui.notify(`Last assistant message incomplete (${msg.stopReason})`, "error");
+						return;
+					}
+					const textParts = msg.content
+						.filter((c): c is { type: "text"; text: string } => c.type === "text")
+						.map((c) => c.text);
+					if (textParts.length > 0) {
+						lastAssistantText = textParts.join("\n");
+						break;
 					}
 				}
 			}
+		}
 
-			if (!lastAssistantText) {
-				ctx.ui.notify("No assistant messages found", "error");
-				return;
-			}
+		if (!lastAssistantText) {
+			ctx.ui.notify("No assistant messages found", "error");
+			return;
+		}
 
-			// Select the best model for extraction (prefer Codex mini, then haiku)
-			const extractionModel = await selectExtractionModel(ctx.model, ctx.modelRegistry);
+		// Select the best model for extraction (prefer Haiku)
+		const extractionModel = await selectExtractionModel(ctx.model, ctx.modelRegistry);
 
-			// Run extraction with loader UI
-			const extractionResult = await ctx.ui.custom<ExtractionResult | null>((tui, theme, _kb, done) => {
-				const loader = new BorderedLoader(tui, theme, `Extracting questions using ${extractionModel.id}...`);
-				loader.onAbort = () => done(null);
+		// Run extraction with loader UI
+		const extractionResult = await ctx.ui.custom<ExtractionResult | null>((tui, theme, _kb, done) => {
+			const loader = new BorderedLoader(tui, theme, `Extracting sections using ${extractionModel.id}...`);
+			loader.onAbort = () => done(null);
 
-				const doExtract = async () => {
-					const apiKey = await ctx.modelRegistry.getApiKey(extractionModel);
-					const userMessage: UserMessage = {
-						role: "user",
-						content: [{ type: "text", text: lastAssistantText! }],
-						timestamp: Date.now(),
-					};
-
-					const response = await complete(
-						extractionModel,
-						{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-						{ apiKey, signal: loader.signal },
-					);
-
-					if (response.stopReason === "aborted") {
-						return null;
-					}
-
-					const responseText = response.content
-						.filter((c): c is { type: "text"; text: string } => c.type === "text")
-						.map((c) => c.text)
-						.join("\n");
-
-					return parseExtractionResult(responseText);
+			const doExtract = async () => {
+				const apiKey = await ctx.modelRegistry.getApiKey(extractionModel);
+				const userMessage: UserMessage = {
+					role: "user",
+					content: [{ type: "text", text: lastAssistantText! }],
+					timestamp: Date.now(),
 				};
 
-				doExtract()
-					.then(done)
-					.catch(() => done(null));
+				const response = await complete(
+					extractionModel,
+					{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
+					{ apiKey, signal: loader.signal },
+				);
 
-				return loader;
-			});
+				if (response.stopReason === "aborted") {
+					return null;
+				}
 
-			if (extractionResult === null) {
-				ctx.ui.notify("Cancelled", "info");
-				return;
-			}
+				const responseText = response.content
+					.filter((c): c is { type: "text"; text: string } => c.type === "text")
+					.map((c) => c.text)
+					.join("\n");
 
-			if (extractionResult.questions.length === 0) {
-				ctx.ui.notify("No questions found in the last message", "info");
-				return;
-			}
+				return parseExtractionResult(responseText);
+			};
 
-			// Show the Q&A component
-			const answersResult = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => {
-				return new QnAComponent(extractionResult.questions, tui, done);
-			});
+			doExtract()
+				.then(done)
+				.catch(() => done(null));
 
-			if (answersResult === null) {
-				ctx.ui.notify("Cancelled", "info");
-				return;
-			}
+			return loader;
+		});
 
-			// Send the answers directly as a message and trigger a turn
-			pi.sendMessage(
-				{
-					customType: "answers",
-					content: "I answered your questions in the following way:\n\n" + answersResult,
-					display: true,
-				},
-				{ triggerTurn: true },
-			);
+		if (extractionResult === null) {
+			ctx.ui.notify("Cancelled", "info");
+			return;
+		}
+
+		if (extractionResult.sections.length === 0) {
+			ctx.ui.notify("No sections found in the last message", "info");
+			return;
+		}
+
+		// Show the section response component
+		const result = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => {
+			return new SectionResponseComponent(extractionResult.sections, tui, done);
+		});
+
+		if (result === null) {
+			ctx.ui.notify("Cancelled", "info");
+			return;
+		}
+
+		// Send the responses as a message and trigger a turn
+		pi.sendMessage(
+			{
+				customType: "answers",
+				content: "Here are my responses to each section:\n\n" + result,
+				display: true,
+			},
+			{ triggerTurn: true },
+		);
 	};
 
 	pi.registerCommand("answer", {
-		description: "Extract questions from last assistant message into interactive Q&A",
+		description: "Extract sections from last assistant message for interactive response",
 		handler: (_args, ctx) => answerHandler(ctx),
 	});
 
 	pi.registerShortcut("ctrl+.", {
-		description: "Extract and answer questions",
+		description: "Extract and respond to sections",
 		handler: answerHandler,
 	});
 }

@@ -18,7 +18,7 @@ pi -e git:github.com/indigoviolet/agentic
 
 ### answer
 
-Interactive Q&A extraction — extracts questions from the last assistant message and presents a custom TUI to answer them one by one. Registers `/answer` command and `Ctrl+.` shortcut.
+Interactive section response — extracts addressable subsections (numbered items, bullets, recommendations, discussion points, questions) from the last assistant message and presents them one at a time for response. Sections with clear options show a selector; others get a free-text editor. Registers `/answer` command and `Ctrl+.` shortcut.
 
 ### subdir-context
 
