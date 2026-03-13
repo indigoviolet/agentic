@@ -30,3 +30,4 @@ Pi coding agent extensions repo — published as a pi package via `pi install gi
 - `context.ts` — TUI overview of loaded context, token usage, costs
 - `subdir-context.ts` — auto-loads subdirectory AGENTS.md files
 - `pin.ts` — pin an assistant response as a widget (full/minimal toggle)
+- `read-lines.ts` — configurable collapsed-view line count for read tool results

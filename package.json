@@ -6,13 +6,22 @@
     "type": "git",
     "url": "https://github.com/indigoviolet/agentic.git"
   },
-  "keywords": ["pi-package", "pi-extension"],
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "dependencies": {
+    "@juanibiapina/pi-extension-settings": "^0.5.1",
+    "nats": "^2.29.3"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*"
   }
 }
