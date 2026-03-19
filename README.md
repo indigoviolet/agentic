@@ -40,6 +40,14 @@ Shows a compact timestamp separator (`── HH:MM:SS ──`) in the conversati
 
 Overrides the built-in `read` tool to show fewer lines in the collapsed TUI view. The default pi renderer shows 10 lines; this extension defaults to 2. Configurable via `/extension-settings` (requires [`pi-extension-settings`](https://github.com/juanibiapina/pi-extension-settings)). Execution delegates entirely to the built-in read implementation.
 
+### pi-horde (separate package)
+
+Moved to [indigoviolet/pi-horde](https://github.com/indigoviolet/pi-horde). Multi-agent networking via NATS — presence, messaging, spawning. Install with:
+
+```bash
+pi install git:github.com/indigoviolet/pi-horde
+```
+
 ### tmux (separate package)
 
 Moved to [indigoviolet/pi-tmux](https://github.com/indigoviolet/pi-tmux). Install with:
