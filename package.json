@@ -16,7 +16,8 @@
     ]
   },
   "dependencies": {
-    "@juanibiapina/pi-extension-settings": "^0.5.1"
+    "@juanibiapina/pi-extension-settings": "^0.5.1",
+    "@romansix/pi-tmux": "file:../pi-tmux"
   },
   "peerDependencies": {
     "@mariozechner/pi-ai": "*",

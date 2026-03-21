@@ -58,6 +58,8 @@ Examples:
 
 If the configured command contains `{path}`, the resolved absolute path is substituted there; otherwise the path is appended as the final argument.
 
+**tmux mode:** Set `external-editor → Use tmux` to `"true"` to run the editor inside the project's tmux session (from [`pi-tmux`](https://github.com/indigoviolet/pi-tmux)) and automatically attach to it in a new terminal tab. This is useful for terminal editors like `vim` or `nvim` where the detached-spawn approach doesn't work.
+
 ### pi-horde (separate package)
 
 Moved to [indigoviolet/pi-horde](https://github.com/indigoviolet/pi-horde). Multi-agent networking via NATS — presence, messaging, spawning. Install with:

@@ -7,9 +7,17 @@ import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { getSetting } from "@juanibiapina/pi-extension-settings";
 import type { SettingDefinition } from "@juanibiapina/pi-extension-settings";
+import {
+  getGitRoot,
+  sessionName,
+  ensureSession,
+  runInWindow,
+  openTerminalTab,
+} from "@romansix/pi-tmux/tmux-utils";
 
 const EXTENSION_NAME = "external-editor";
 const COMMAND_SETTING_ID = "command";
+const USE_TMUX_SETTING_ID = "use_tmux";
 
 const ExternalEditorParams = Type.Object({
   path: Type.String({ description: "Path to open in the external editor" }),
@@ -24,6 +32,11 @@ interface ExternalEditorDetails {
 
 function getConfiguredCommand(): string {
   return (getSetting(EXTENSION_NAME, COMMAND_SETTING_ID, "") ?? "").trim();
+}
+
+function getUseTmux(): boolean {
+  const val = getSetting(EXTENSION_NAME, USE_TMUX_SETTING_ID, "false") ?? "false";
+  return val === "true";
 }
 
 function normalizePath(rawPath: string, cwd: string): string {
@@ -92,6 +105,13 @@ export default function externalEditorExtension(pi: ExtensionAPI) {
           "Command used to open files. Use {path} to place the resolved path explicitly; otherwise the path is appended.",
         defaultValue: "",
       },
+      {
+        id: USE_TMUX_SETTING_ID,
+        label: "Use tmux",
+        description:
+          'Run the editor in the project tmux session and attach to it. Set to "true" to enable.',
+        defaultValue: "false",
+      },
     ] satisfies SettingDefinition[],
   });
 
@@ -125,6 +145,34 @@ export default function externalEditorExtension(pi: ExtensionAPI) {
 
       const resolvedPath = normalizePath(params.path, ctx.cwd);
       const launchCommand = buildLaunchCommand(configuredCommand, resolvedPath);
+      const useTmux = getUseTmux();
+
+      if (useTmux) {
+        const gitRoot = getGitRoot(ctx.cwd);
+        if (!gitRoot) {
+          throw new Error("Not in a git repository — tmux mode requires a git repo.");
+        }
+
+        const session = sessionName(gitRoot);
+        ensureSession(session, gitRoot);
+        const winIdx = runInWindow(session, gitRoot, launchCommand, "editor");
+        const attachMsg = openTerminalTab(session, winIdx);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Opened ${resolvedPath} in tmux window :${winIdx}. ${attachMsg}`,
+            },
+          ],
+          details: {
+            configuredCommand,
+            launchCommand,
+            requestedPath: params.path,
+            resolvedPath,
+          } satisfies ExternalEditorDetails,
+        };
+      }
 
       await launchEditor(launchCommand, ctx.cwd);
 
