@@ -7,13 +7,6 @@ import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { getSetting } from "@juanibiapina/pi-extension-settings";
 import type { SettingDefinition } from "@juanibiapina/pi-extension-settings";
-import {
-  getGitRoot,
-  sessionName,
-  ensureSession,
-  runInWindow,
-  openTerminalTab,
-} from "@romansix/pi-tmux/tmux-utils";
 
 const EXTENSION_NAME = "external-editor";
 const COMMAND_SETTING_ID = "command";
@@ -115,6 +108,36 @@ export default function externalEditorExtension(pi: ExtensionAPI) {
     ] satisfies SettingDefinition[],
   });
 
+  // Listen for cross-extension open requests (e.g. from pi-fzf secondary actions)
+  pi.events.on("external-editor:open", async (data: unknown) => {
+    const { path: rawPath, cwd } = data as { path: string; cwd: string };
+    if (!rawPath?.trim()) return;
+
+    const configuredCommand = getConfiguredCommand();
+    if (!configuredCommand) {
+      console.error("external-editor: no editor command configured");
+      return;
+    }
+
+    const resolvedPath = normalizePath(rawPath, cwd);
+    const launchCommand = buildLaunchCommand(configuredCommand, resolvedPath);
+    const useTmux = getUseTmux();
+
+    if (useTmux) {
+      const gitRoot = getGitRoot(cwd);
+      if (!gitRoot) {
+        console.error("external-editor: not in a git repo, cannot use tmux mode");
+        return;
+      }
+      const session = sessionName(gitRoot);
+      ensureSession(session, gitRoot);
+      const winIdx = runInWindow(session, gitRoot, launchCommand, "editor");
+      openTerminalTab(session, winIdx);
+    } else {
+      await launchEditor(launchCommand, cwd);
+    }
+  });
+
   pi.registerTool({
     name: "external_editor",
     label: "External Editor",
@@ -148,21 +171,26 @@ export default function externalEditorExtension(pi: ExtensionAPI) {
       const useTmux = getUseTmux();
 
       if (useTmux) {
-        const gitRoot = getGitRoot(ctx.cwd);
-        if (!gitRoot) {
-          throw new Error("Not in a git repository — tmux mode requires a git repo.");
-        }
+        let result: { windowIndex: number; attachMsg: string } | { error: string } | null = null;
+        pi.events.emit("pi-tmux:run-and-attach", {
+          cwd: ctx.cwd,
+          command: launchCommand,
+          name: "editor",
+          callback: (r: typeof result) => { result = r; },
+        });
 
-        const session = sessionName(gitRoot);
-        ensureSession(session, gitRoot);
-        const winIdx = runInWindow(session, gitRoot, launchCommand, "editor");
-        const attachMsg = openTerminalTab(session, winIdx);
+        if (!result) {
+          throw new Error("pi-tmux extension is not loaded — install @romansix/pi-tmux to use tmux mode.");
+        }
+        if ("error" in result) {
+          throw new Error(result.error);
+        }
 
         return {
           content: [
             {
               type: "text",
-              text: `Opened ${resolvedPath} in tmux window :${winIdx}. ${attachMsg}`,
+              text: `Opened ${resolvedPath} in tmux window :${result.windowIndex}. ${result.attachMsg}`,
             },
           ],
           details: {
