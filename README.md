@@ -36,6 +36,12 @@ Pin an assistant response as a widget above the editor. `/pin` opens a selector 
 
 Shows a compact timestamp separator (`── HH:MM:SS ──`) in the conversation flow after each agent response completes. Useful for tracking when interactions happened during long sessions.
 
+### powerbar-current-dir
+
+Emits a `current-dir` segment for [pi-powerbar](https://github.com/juanibiapina/pi-powerbar) showing the current working directory as a home-relative path like `~/dev/agentic`. Updates on session start and session switch.
+
+If you use it with `pi-powerbar`, load `pi-powerbar` before this package so it can receive the segment registration and update events.
+
 ### read-lines
 
 Overrides the built-in `read` tool to show fewer lines in the collapsed TUI view. The default pi renderer shows 10 lines; this extension defaults to 2. Configurable via `/extension-settings` (requires [`pi-extension-settings`](https://github.com/juanibiapina/pi-extension-settings)). Execution delegates entirely to the built-in read implementation.
