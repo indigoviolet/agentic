@@ -14,12 +14,26 @@ const USE_TMUX_SETTING_ID = "use_tmux";
 
 const ExternalEditorParams = Type.Object({
   path: Type.String({ description: "Path to open in the external editor" }),
+  line: Type.Optional(
+    Type.Union([
+      Type.Number({ description: "Optional 1-based line number to open" }),
+      Type.String({ description: "Optional 1-based line number to open" }),
+    ]),
+  ),
+  column: Type.Optional(
+    Type.Union([
+      Type.Number({ description: "Optional 1-based column number to open" }),
+      Type.String({ description: "Optional 1-based column number to open" }),
+    ]),
+  ),
 });
 
 interface ExternalEditorDetails {
   configuredCommand: string;
   launchCommand: string;
   requestedPath: string;
+  requestedLine?: string;
+  requestedColumn?: string;
   resolvedPath: string;
 }
 
@@ -61,11 +75,38 @@ function quoteForShell(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-function buildLaunchCommand(command: string, resolvedPath: string): string {
-  const quotedPath = quoteForShell(resolvedPath);
+function normalizeLocationNumber(value: string | number | undefined): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const normalized = String(value).trim();
+  return /^\d+$/.test(normalized) ? normalized : undefined;
+}
 
-  if (command.includes("{path}")) {
-    return command.split("{path}").join(quotedPath);
+function buildLaunchCommand(
+  command: string,
+  resolvedPath: string,
+  line?: string,
+  column?: string,
+): string {
+  const quotedPath = quoteForShell(resolvedPath);
+  const lineSpec = line ? `+${line}${column ? `:${column}` : ""}` : "";
+
+  if (
+    command.includes("{path}") ||
+    command.includes("{line}") ||
+    command.includes("{column}") ||
+    command.includes("{lineSpec}")
+  ) {
+    return command
+      .split("{path}")
+      .join(quotedPath)
+      .split("{line}")
+      .join(line ?? "")
+      .split("{column}")
+      .join(column ?? "")
+      .split("{lineSpec}")
+      .join(lineSpec)
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   return `${command} ${quotedPath}`;
@@ -96,6 +137,8 @@ async function openConfiguredEditor(
   pi: ExtensionAPI,
   requestedPath: string,
   cwd: string,
+  requestedLine?: string | number,
+  requestedColumn?: string | number,
 ): Promise<ExternalEditorOpenResult> {
   const configuredCommand = getConfiguredCommand();
   if (!configuredCommand) {
@@ -109,7 +152,14 @@ async function openConfiguredEditor(
   }
 
   const resolvedPath = normalizePath(requestedPath, cwd);
-  const launchCommand = buildLaunchCommand(configuredCommand, resolvedPath);
+  const line = normalizeLocationNumber(requestedLine);
+  const column = normalizeLocationNumber(requestedColumn);
+  const launchCommand = buildLaunchCommand(
+    configuredCommand,
+    resolvedPath,
+    line,
+    column,
+  );
   const useTmux = getUseTmux();
 
   if (useTmux) {
@@ -139,6 +189,8 @@ async function openConfiguredEditor(
       configuredCommand,
       launchCommand,
       requestedPath,
+      requestedLine: line,
+      requestedColumn: column,
       resolvedPath,
       windowIndex: result.windowIndex,
       attachMsg: result.attachMsg,
@@ -151,6 +203,8 @@ async function openConfiguredEditor(
     configuredCommand,
     launchCommand,
     requestedPath,
+    requestedLine: line,
+    requestedColumn: column,
     resolvedPath,
   };
 }
@@ -167,7 +221,7 @@ export default function externalEditorExtension(pi: ExtensionAPI) {
         id: COMMAND_SETTING_ID,
         label: "Editor command",
         description:
-          "Command used to open files. Use {path} to place the resolved path explicitly; otherwise the path is appended.",
+          "Command used to open files. Use {path} to place the resolved path explicitly; optional placeholders: {line}, {column}, and {lineSpec} (e.g. +LINE[:COLUMN]). Otherwise the path is appended.",
         defaultValue: "",
       },
       {
@@ -185,11 +239,21 @@ export default function externalEditorExtension(pi: ExtensionAPI) {
   globalState.__agenticExternalEditorOpenUnsubscribe = pi.events.on(
     "external-editor:open",
     async (data: unknown) => {
-      const { path: rawPath, cwd } = data as { path: string; cwd: string };
+      const {
+        path: rawPath,
+        cwd,
+        line,
+        column,
+      } = data as {
+        path: string;
+        cwd: string;
+        line?: string | number;
+        column?: string | number;
+      };
       if (!rawPath?.trim()) return;
 
       try {
-        await openConfiguredEditor(pi, rawPath, cwd);
+        await openConfiguredEditor(pi, rawPath, cwd, line, column);
       } catch (error) {
         console.error(
           `external-editor: failed to open ${rawPath}: ${error instanceof Error ? error.message : String(error)}`,
@@ -215,7 +279,13 @@ export default function externalEditorExtension(pi: ExtensionAPI) {
         throw new Error("external_editor was cancelled before launch");
       }
 
-      const result = await openConfiguredEditor(pi, params.path, ctx.cwd);
+      const result = await openConfiguredEditor(
+        pi,
+        params.path,
+        ctx.cwd,
+        params.line,
+        params.column,
+      );
 
       if (result.windowIndex !== undefined && result.attachMsg) {
         return {
