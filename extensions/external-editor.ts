@@ -23,6 +23,11 @@ interface ExternalEditorDetails {
   resolvedPath: string;
 }
 
+interface ExternalEditorOpenResult extends ExternalEditorDetails {
+  windowIndex?: number;
+  attachMsg?: string;
+}
+
 function getConfiguredCommand(): string {
   return (getSetting(EXTENSION_NAME, COMMAND_SETTING_ID, "") ?? "").trim();
 }
@@ -87,7 +92,74 @@ function launchEditor(command: string, cwd: string): Promise<void> {
   });
 }
 
+async function openConfiguredEditor(
+  pi: ExtensionAPI,
+  requestedPath: string,
+  cwd: string,
+): Promise<ExternalEditorOpenResult> {
+  const configuredCommand = getConfiguredCommand();
+  if (!configuredCommand) {
+    throw new Error(
+      "No external editor command is configured. Configure external-editor.command via /extension-settings first.",
+    );
+  }
+
+  if (!requestedPath.trim()) {
+    throw new Error("Path must not be empty");
+  }
+
+  const resolvedPath = normalizePath(requestedPath, cwd);
+  const launchCommand = buildLaunchCommand(configuredCommand, resolvedPath);
+  const useTmux = getUseTmux();
+
+  if (useTmux) {
+    let result:
+      | { windowIndex: number; attachMsg: string }
+      | { error: string }
+      | null = null;
+    pi.events.emit("pi-tmux:run-and-attach", {
+      cwd,
+      command: launchCommand,
+      name: "editor",
+      callback: (r: typeof result) => {
+        result = r;
+      },
+    });
+
+    if (!result) {
+      throw new Error(
+        "pi-tmux extension is not loaded — install @romansix/pi-tmux to use tmux mode.",
+      );
+    }
+    if ("error" in result) {
+      throw new Error(result.error);
+    }
+
+    return {
+      configuredCommand,
+      launchCommand,
+      requestedPath,
+      resolvedPath,
+      windowIndex: result.windowIndex,
+      attachMsg: result.attachMsg,
+    };
+  }
+
+  await launchEditor(launchCommand, cwd);
+
+  return {
+    configuredCommand,
+    launchCommand,
+    requestedPath,
+    resolvedPath,
+  };
+}
+
 export default function externalEditorExtension(pi: ExtensionAPI) {
+  const globalState = globalThis as typeof globalThis & {
+    __agenticExternalEditorOpenUnsubscribe?: (() => void) | undefined;
+  };
+
   pi.events.emit("pi-extension-settings:register", {
     name: EXTENSION_NAME,
     settings: [
@@ -109,34 +181,22 @@ export default function externalEditorExtension(pi: ExtensionAPI) {
   });
 
   // Listen for cross-extension open requests (e.g. from pi-fzf secondary actions)
-  pi.events.on("external-editor:open", async (data: unknown) => {
-    const { path: rawPath, cwd } = data as { path: string; cwd: string };
-    if (!rawPath?.trim()) return;
+  globalState.__agenticExternalEditorOpenUnsubscribe?.();
+  globalState.__agenticExternalEditorOpenUnsubscribe = pi.events.on(
+    "external-editor:open",
+    async (data: unknown) => {
+      const { path: rawPath, cwd } = data as { path: string; cwd: string };
+      if (!rawPath?.trim()) return;
 
-    const configuredCommand = getConfiguredCommand();
-    if (!configuredCommand) {
-      console.error("external-editor: no editor command configured");
-      return;
-    }
-
-    const resolvedPath = normalizePath(rawPath, cwd);
-    const launchCommand = buildLaunchCommand(configuredCommand, resolvedPath);
-    const useTmux = getUseTmux();
-
-    if (useTmux) {
-      const gitRoot = getGitRoot(cwd);
-      if (!gitRoot) {
-        console.error("external-editor: not in a git repo, cannot use tmux mode");
-        return;
+      try {
+        await openConfiguredEditor(pi, rawPath, cwd);
+      } catch (error) {
+        console.error(
+          `external-editor: failed to open ${rawPath}: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
-      const session = sessionName(gitRoot);
-      ensureSession(session, gitRoot);
-      const winIdx = runInWindow(session, gitRoot, launchCommand, "editor");
-      openTerminalTab(session, winIdx);
-    } else {
-      await launchEditor(launchCommand, cwd);
-    }
-  });
+    },
+  );
 
   pi.registerTool({
     name: "external_editor",
@@ -155,67 +215,37 @@ export default function externalEditorExtension(pi: ExtensionAPI) {
         throw new Error("external_editor was cancelled before launch");
       }
 
-      const configuredCommand = getConfiguredCommand();
-      if (!configuredCommand) {
-        throw new Error(
-          "No external editor command is configured. Configure external-editor.command via /extension-settings first.",
-        );
-      }
+      const result = await openConfiguredEditor(pi, params.path, ctx.cwd);
 
-      if (!params.path.trim()) {
-        throw new Error("Path must not be empty");
-      }
-
-      const resolvedPath = normalizePath(params.path, ctx.cwd);
-      const launchCommand = buildLaunchCommand(configuredCommand, resolvedPath);
-      const useTmux = getUseTmux();
-
-      if (useTmux) {
-        let result: { windowIndex: number; attachMsg: string } | { error: string } | null = null;
-        pi.events.emit("pi-tmux:run-and-attach", {
-          cwd: ctx.cwd,
-          command: launchCommand,
-          name: "editor",
-          callback: (r: typeof result) => { result = r; },
-        });
-
-        if (!result) {
-          throw new Error("pi-tmux extension is not loaded — install @romansix/pi-tmux to use tmux mode.");
-        }
-        if ("error" in result) {
-          throw new Error(result.error);
-        }
-
+      if (result.windowIndex !== undefined && result.attachMsg) {
         return {
           content: [
             {
               type: "text",
-              text: `Opened ${resolvedPath} in tmux window :${result.windowIndex}. ${result.attachMsg}`,
+              text: `Opened ${result.resolvedPath} in tmux window :${result.windowIndex}. ${result.attachMsg}`,
             },
           ],
           details: {
-            configuredCommand,
-            launchCommand,
-            requestedPath: params.path,
-            resolvedPath,
+            configuredCommand: result.configuredCommand,
+            launchCommand: result.launchCommand,
+            requestedPath: result.requestedPath,
+            resolvedPath: result.resolvedPath,
           } satisfies ExternalEditorDetails,
         };
       }
-
-      await launchEditor(launchCommand, ctx.cwd);
 
       return {
         content: [
           {
             type: "text",
-            text: `Opened ${resolvedPath} in the configured external editor.`,
+            text: `Opened ${result.resolvedPath} in the configured external editor.`,
           },
         ],
         details: {
-          configuredCommand,
-          launchCommand,
-          requestedPath: params.path,
-          resolvedPath,
+          configuredCommand: result.configuredCommand,
+          launchCommand: result.launchCommand,
+          requestedPath: result.requestedPath,
+          resolvedPath: result.resolvedPath,
         } satisfies ExternalEditorDetails,
       };
     },
