@@ -19,6 +19,25 @@ import path from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
+const EXCLUDED_DIR_NAMES = new Set([
+	".git",
+	".hg",
+	".svn",
+	".pi",
+	".venv",
+	"venv",
+	"node_modules",
+	"__pycache__",
+	".tox",
+	".mypy_cache",
+	"dist",
+	"build",
+]);
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export default function subdirContext(pi: ExtensionAPI) {
 	// Set of absolute AGENTS.md paths already loaded (or queued for loading)
 	const loadedAgents = new Set<string>();
@@ -47,16 +66,34 @@ export default function subdirContext(pi: ExtensionAPI) {
 		return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 	}
 
+	function hasExcludedDir(targetPath: string): boolean {
+		const normalized = path.normalize(targetPath);
+		const parts = normalized.split(path.sep).filter(Boolean);
+		return parts.some((part) => EXCLUDED_DIR_NAMES.has(part));
+	}
+
+	function shouldTrackAgentsPath(rootDir: string, targetPath: string): boolean {
+		if (targetPath === cwdAgentsPath) return false;
+		if (!isInsideRoot(rootDir, targetPath)) return false;
+		if (hasExcludedDir(path.relative(rootDir, targetPath))) return false;
+		return true;
+	}
+
 	async function scanForAgentsFiles(cwd: string): Promise<Map<string, string>> {
 		const result = new Map<string, string>();
+		const fdExcludeArgs = [...EXCLUDED_DIR_NAMES].flatMap((dir) => ["--exclude", dir]);
 
 		// Try fd first, fall back to find
 		let output: string;
 		try {
-			const fdResult = await pi.exec("fd", ["-H", "--no-ignore", "-t", "f", "-g", "AGENTS.md"], {
-				cwd,
-				timeout: 10000,
-			});
+			const fdResult = await pi.exec(
+				"fd",
+				["-H", "--no-ignore", ...fdExcludeArgs, "-t", "f", "-g", "AGENTS.md"],
+				{
+					cwd,
+					timeout: 10000,
+				},
+			);
 			if (fdResult.code === 0) {
 				output = fdResult.stdout;
 			} else {
@@ -79,15 +116,8 @@ export default function subdirContext(pi: ExtensionAPI) {
 			const trimmed = line.trim();
 			if (!trimmed) continue;
 
-			// Normalize to absolute path
-			const absPath = path.isAbsolute(trimmed) ? trimmed : path.resolve(cwd, trimmed);
-			const normalized = path.normalize(absPath);
-
-			// Skip root AGENTS.md (pi already loads it)
-			if (normalized === cwdAgentsPath) continue;
-
-			// Only include files inside project root
-			if (!isInsideRoot(cwd, normalized)) continue;
+			const normalized = resolvePath(trimmed, cwd);
+			if (!shouldTrackAgentsPath(cwd, normalized)) continue;
 
 			const dir = path.dirname(normalized);
 			const relDir = path.relative(cwd, dir);
@@ -117,7 +147,9 @@ export default function subdirContext(pi: ExtensionAPI) {
 					path.basename(block.arguments.path) === "AGENTS.md"
 				) {
 					const absPath = path.normalize(resolvePath(block.arguments.path, currentCwd));
-					loadedAgents.add(absPath);
+					if (shouldTrackAgentsPath(currentCwd, absPath)) {
+						loadedAgents.add(absPath);
+					}
 				}
 			}
 		}
@@ -133,8 +165,9 @@ export default function subdirContext(pi: ExtensionAPI) {
 		let dir = path.dirname(filePath);
 
 		while (isInsideRoot(currentCwd, dir) && dir !== currentCwd) {
-			const candidate = path.join(dir, "AGENTS.md");
-			if (candidate !== cwdAgentsPath && agentsDirMap.has(path.relative(currentCwd, dir))) {
+			const relDir = path.relative(currentCwd, dir);
+			const candidate = agentsDirMap.get(relDir);
+			if (candidate) {
 				agents.push(candidate);
 			}
 
@@ -165,8 +198,17 @@ export default function subdirContext(pi: ExtensionAPI) {
 	}
 
 	function allLoaded(): boolean {
-		// +1 because loadedAgents includes the root AGENTS.md which isn't in agentsDirMap
-		return loadedAgents.size > agentsDirMap.size;
+		for (const absPath of agentsDirMap.values()) {
+			if (!loadedAgents.has(absPath)) return false;
+		}
+		return true;
+	}
+
+	function commandReferencesDir(command: string, relDir: string): boolean {
+		const escaped = escapeRegExp(relDir);
+		const boundary = '(?:^|\\s|["\'=:./-]|\\\\)';
+		const pattern = new RegExp(`${boundary}${escaped}(?:$|\\s|["\'=:./-]|\\\\)`);
+		return pattern.test(command);
 	}
 
 	// --- Event handlers ---
@@ -191,7 +233,9 @@ export default function subdirContext(pi: ExtensionAPI) {
 
 			// If this is an AGENTS.md being read, just track it
 			if (path.basename(absolutePath) === "AGENTS.md") {
-				loadedAgents.add(path.normalize(absolutePath));
+				if (shouldTrackAgentsPath(currentCwd, absolutePath)) {
+					loadedAgents.add(path.normalize(absolutePath));
+				}
 				return undefined;
 			}
 
@@ -210,7 +254,7 @@ export default function subdirContext(pi: ExtensionAPI) {
 
 			for (const [relDir, absAgentsPath] of agentsDirMap) {
 				if (loadedAgents.has(absAgentsPath)) continue;
-				if (command.includes(relDir)) {
+				if (commandReferencesDir(command, relDir)) {
 					matched.push(absAgentsPath);
 				}
 			}

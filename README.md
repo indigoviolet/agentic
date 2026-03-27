@@ -22,7 +22,7 @@ Interactive section response — extracts addressable subsections (numbered item
 
 ### subdir-context
 
-Automatically loads `AGENTS.md` files from subdirectories when the agent reads files or runs bash commands that reference those directories. Scans the project at session start, then sends followUp read messages through the normal pipeline so other extensions (like `context`) can see them. Inspired by [default-anton/pi-subdir-context](https://github.com/default-anton/pi-subdir-context).
+Automatically loads `AGENTS.md` files from subdirectories when the agent reads files or runs bash commands that reference those directories. Scans the project at session start, skips config/dependency trees like `.pi/`, `.venv/`, and `node_modules/`, then sends followUp read messages through the normal pipeline so other extensions (like `context`) can see them. Bash matching is path-aware to avoid false positives from commands like `python3 --version`. Inspired by [default-anton/pi-subdir-context](https://github.com/default-anton/pi-subdir-context).
 
 ### context
 
