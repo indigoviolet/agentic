@@ -42,9 +42,11 @@ Emits a `current-dir` segment for [pi-powerbar](https://github.com/juanibiapina/
 
 If you use it with `pi-powerbar`, load `pi-powerbar` before this package so it can receive the segment registration and update events.
 
-### read-lines
+### collapsed-results
 
-Overrides the built-in `read` tool to show fewer lines in the collapsed TUI view. The default pi renderer shows 10 lines; this extension defaults to 2. Configurable via `/extension-settings` (requires [`pi-extension-settings`](https://github.com/juanibiapina/pi-extension-settings)). Execution delegates entirely to the built-in read implementation.
+Overrides the built-in `read`, `grep`, and `find` tools to show fewer lines in the collapsed TUI view. This extension defaults to 2 visible lines and delegates execution entirely to the built-in tool implementations. Configurable via `/extension-settings` (requires [`pi-extension-settings`](https://github.com/juanibiapina/pi-extension-settings)).
+
+The shared `collapsedLines` setting applies to all three tools.
 
 ### external-editor
 
